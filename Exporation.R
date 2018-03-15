@@ -1,76 +1,97 @@
 library(data.table)
 library(dplyr)
-library(tidyr)
-library(stringr)
-library(lubridate)
-library(plotly)
+library(DT)
 library(ggplot2)  #using CRAN's, not GitHub's
 library(ggthemes)
+library(lubridate)
+library(plotly)
+library(readr)
+library(stringr)
+library(tidyr)
 
 
-## Read in as Tibble, convert to Date type
-RawStockData <- tbl_df(fread("Dated_stocks-us-adjClose.csv", fill=T))  ## Tibble.  Fill for uneven row length; it's not filling NA's
-RawStockData$ObsDate <- as.Date(RawStockData$ObsDate, format = '%Y-%m-%d')
+##### Vector of dataframe names derived from files in repo home
+AllCsvsInRepoHome <- dir()[grep('*.csv', dir())]
+RelevantFileNames <- str_split(AllCsvsInRepoHome, 'us-')
+RelevantFileNames <- gsub("adj", "Adj", gsub(".csv", "", sapply(RelevantFileNames, "[[", 2)))
+RelevantFileNames
 
 
-## Take a look
-class(RawStockData)
-head(RawStockData)
-
-
-##  ~ 12k rows by 711 cols.  Over 5/8 of values are NA
-dim(RawStockData)
-mean(is.na(RawStockData)) 
-
-
-### What does the distribution of NAs look like
-options(scipen = 10)
-SoManyNAs <- as.data.frame(sapply(RawStockData, function(x) round(sum(is.na(x))/length(x), 2) ))
-if (dim(SoManyNAs)[2] == 1){
-  setDT(SoManyNAs, keep.rownames = T)
-  colnames(SoManyNAs) <- c("Ticker", "Count")
+##### Create all the dataframes by import iteration
+for(i in seq_along(RelevantFileNames)){
+  TheName <- paste0("Raw", RelevantFileNames[i], sep="")
+  #assign(TheName, tbl_df(fread(AllCsvsInRepoHome[i], fill=T)), envir = .GlobalEnv) 
+  assign(TheName,  read_csv(AllCsvsInRepoHome[i]), envir = .GlobalEnv)  #fread cannot infer or take colTypes.  Important for ObsDate
 }
-SoManyNAs <- SoManyNAs[SoManyNAs$Ticker != 'ObsDate', ]
-p <-ggplot(SoManyNAs, aes(SoManyNAs$Count)) + 
-  geom_histogram(breaks=seq(0, 1, .01)) + 
+
+
+##### Do all the dataframes have same dims and NAs
+AllFileMeanNA <- vector()
+AllFileDimCol <- vector()
+AllFileDimRow <- vector()
+AllFileName   <- vector()
+for (i in seq_along(RelevantFileNames)){
+  AllFileName[i]   <- eval(parse(text="paste0('Raw', RelevantFileNames)[i]"))
+  AllFileMeanNA[i] <- round(mean(is.na(get(eval(parse(text="paste0('Raw', RelevantFileNames)[i]"))))), 4)
+  AllFileDimCol[i] <- ncol(get(eval(parse(text="paste0('Raw', RelevantFileNames)[i]"))))
+  AllFileDimRow[i] <- nrow(get(eval(parse(text="paste0('Raw', RelevantFileNames)[i]"))))
+}
+StatsOnEachDF <- tibble(AllFileName, AllFileDimRow, AllFileDimCol, AllFileMeanNA)
+StatsOnEachDF
+
+
+##### What does the distribution of NAs look like
+options(scipen = 10)
+ClosingNAs <- as.data.frame(sapply(RawAdjClose, function(x) round(sum(is.na(x))/length(x), 2) ))
+if (dim(ClosingNAs)[2] == 1){
+  setDT(ClosingNAs, keep.rownames = T)
+  colnames(ClosingNAs) <- c("Ticker", "Percentile")
+}
+ClosingNAs <- ClosingNAs[ClosingNAs$Ticker != 'ObsDate', ]
+p <-ggplot(ClosingNAs, aes(ClosingNAs$Percentile)) + 
+  geom_histogram(bins=100, fill='darkgreen') + 
   labs(x="Percent NA by Stock", y="# of Stocks at Given Percentile of NAs") + 
-  ggtitle("Distribution of NA/NULL Values in Dataset") +
+  ggtitle("Distribution of NA/NULL Values in Closings Dataset") +
   theme_stata()
 ggplotly(p)
-#ggplot(SoManyNAs, aes(SoManyNAs$count)) + stat_ecdf(geom = "step")
+#ggplot(ClosingNAs, aes(ClosingNAs$Percentile)) + stat_ecdf(geom = "step")
 
 
-## Initial reshape: melt/gather
-StockData <- gather(RawStockData, key=Ticker, value=Close, names(RawStockData)[-1]) %>%
+
+###################################################################
+##### Initial reshape: melt/gather
+###################################################################
+TidyClosingStockData <- gather(RawAdjClose, key=Ticker, value=Close, names(RawAdjClose)[-1]) %>%
   arrange(Ticker, ObsDate)
 
 
-## check out DF size
-sl <- object.size(StockData)
+##### check out DF size
+sl <- object.size(TidyClosingStockData)
 print(sl, units='auto')
 
 
-## Convert tickers to factors; reduces given DF size by ~32 Mb
-StockData$Ticker <- as.factor(StockData$Ticker)
-sl <- object.size(StockData)
+##### Convert tickers to factors; reduces given DF size by ~32 Mb
+TidyClosingStockData$Ticker <- as.factor(TidyClosingStockData$Ticker)
+sl <- object.size(TidyClosingStockData)
 print(sl, units='auto')
 
 
-## Quick data validation check to make sure we only have Mon - Fri
-table(weekdays(StockData$ObsDate))
+##### Quick data validation check to make sure we only have Mon - Fri
+TidyClosingDaysTable <- table(weekdays(TidyClosingStockData$ObsDate))
 
 
-## NA's were so extensive, it seems inadvisable to fill, impute, or interpolate for them.
-## TODO:  figure out why na.omit increases object size ???
-StockData <- StockData %>% na.omit() 
+##### NA's were so extensive, it seems inadvisable to fill, impute, or interpolate for them.
+# TODO: how to group by Ticker, and find length of NA's using RLE, but only inside margins...only after 1st !NA or before last !NA.  Possible?
+# DONT remove NA's until you compare NA's in 4 other CSV's.
+TidyClosingStockData <- TidyClosingStockData %>% filter(!is.na(Close))  
 
-sl <- object.size(StockData)
+sl <- object.size(TidyClosingStockData)
 print(sl, units='auto')
 
 
-## Get a distribution of records for all Tickers across Years.
-RecordsPerYearAndStock <-
-StockData %>%
+##### Get a distribution of records for all Tickers across Years.
+ClosingRecordsPerYearAndStock <-
+TidyClosingStockData %>%
   mutate(ObsYear = year(ObsDate)) %>%
   group_by(ObsYear, Ticker) %>%
   add_count() %>%
@@ -79,9 +100,9 @@ StockData %>%
   distinct()
 
 
-## Get a count of Tickers per Year.
-RecordsPerYear <-
-RecordsPerYearAndStock %>%
+##### Get a count of Tickers per Year.
+ClosingRecordsPerYear <-
+ClosingRecordsPerYearAndStock %>%
   ungroup() %>%
   select(-Ticker) %>%
   group_by(ObsYear) %>%
@@ -90,13 +111,16 @@ RecordsPerYearAndStock %>%
   distinct() %>%
   arrange(ObsYear)
 
-p <- ggplot(RecordsPerYear, aes(ObsYear, StocksPerYear)) + 
+p <- ggplot(ClosingRecordsPerYear, aes(ObsYear, StocksPerYear)) + 
   geom_point() + 
   stat_smooth(method = 'lm', se=F, size=.2) + 
   ggtitle("Stocks in the Dataset by Year") +
   labs(y ="# of Stocks With Trading Activity in Given Year") + 
   theme_stata()
 ggplotly(p)
+
+
+
 
 
 
