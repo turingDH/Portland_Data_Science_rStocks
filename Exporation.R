@@ -1,3 +1,4 @@
+library(cowplot)
 library(data.table)
 library(dplyr)
 library(DT)
@@ -5,6 +6,7 @@ library(ggplot2)  #using CRAN's, not GitHub's
 library(ggthemes)
 library(lubridate)
 library(plotly)
+library(purrr)
 library(readr)
 library(stringr)
 library(tidyr)
@@ -42,53 +44,86 @@ StatsOnEachDF
 
 ##### What does the distribution of NAs look like
 options(scipen = 10)
-ClosingNAs <- as.data.frame(sapply(RawAdjClose, function(x) round(sum(is.na(x))/length(x), 2) ))
-if (dim(ClosingNAs)[2] == 1){
-  setDT(ClosingNAs, keep.rownames = T)
-  colnames(ClosingNAs) <- c("Ticker", "Percentile")
+
+Distribution_of_NA <- function(DF, DataSetDescriptor) {
+  TheNAs <- as.data.frame(sapply(DF, function(x) round(sum(is.na(x))/length(x), 2) ))
+  if (dim(TheNAs)[2] == 1){
+    setDT(TheNAs, keep.rownames = T)
+    colnames(TheNAs) <- c("Ticker", "Percentile")
+  }
+  TheNAs <- TheNAs[TheNAs$Ticker != 'ObsDate', ]
+  p <-ggplot(TheNAs, aes(TheNAs$Percentile)) + 
+    geom_histogram(bins=100, fill='darkgreen') + 
+    labs(x="Percent NA by Stock", y="# of Stocks at Given Percentile of NAs") + 
+    ggtitle(paste("Distribution of NA/NULL Values in", DataSetDescriptor, "Dataset", sep=" ")) +
+    theme_stata()
+  
+  return(ggplotly(p))
+  #ggplot(TheNAs, aes(TheNAs$Percentile)) + stat_ecdf(geom = "step")
 }
-ClosingNAs <- ClosingNAs[ClosingNAs$Ticker != 'ObsDate', ]
-p <-ggplot(ClosingNAs, aes(ClosingNAs$Percentile)) + 
-  geom_histogram(bins=100, fill='darkgreen') + 
-  labs(x="Percent NA by Stock", y="# of Stocks at Given Percentile of NAs") + 
-  ggtitle("Distribution of NA/NULL Values in Closings Dataset") +
-  theme_stata()
-ggplotly(p)
-#ggplot(ClosingNAs, aes(ClosingNAs$Percentile)) + stat_ecdf(geom = "step")
+
+AdjHighNA_GGPlotly  <- Distribution_of_NA(RawAdjHigh,  "Highs")
+AdjLowNA_GGPlotly   <- Distribution_of_NA(RawAdjLow,   "Lows")
+AdjOpenhNA_GGPlotly <- Distribution_of_NA(RawAdjOpen,  "Openings")
+AdjCloseNA_GGPlotly <- Distribution_of_NA(RawAdjClose, "Closings")
+VolumeNA_GGPlotly   <- Distribution_of_NA(RawVolume,   "Volume")
 
 
 
-###################################################################
-##### Initial reshape: melt/gather
-###################################################################
-TidyClosingStockData <- gather(RawAdjClose, key=Ticker, value=Close, names(RawAdjClose)[-1]) %>%
-  arrange(Ticker, ObsDate)
 
 
-##### check out DF size
-sl <- object.size(TidyClosingStockData)
-print(sl, units='auto')
+##### Reshape: melt/gather
+Tidy_all_the_raw_things <- function(RawDF, theMetric) {
+  GatheredDF <- gather(RawDF, key=Ticker, value = Value, names(RawDF)[-1]) %>%
+    arrange(Ticker, ObsDate)
+  
+  colnames(GatheredDF)[ncol(GatheredDF)] <- theMetric
+  return(GatheredDF)
+}
 
-
-##### Convert tickers to factors; reduces given DF size by ~32 Mb
-TidyClosingStockData$Ticker <- as.factor(TidyClosingStockData$Ticker)
-sl <- object.size(TidyClosingStockData)
-print(sl, units='auto')
+TidyAdjClose <- Tidy_all_the_raw_things(RawAdjClose, 'AdjClose')
+TidyAdjHigh  <- Tidy_all_the_raw_things(RawAdjHigh, 'AdjHigh')
+TidyAdjLow   <- Tidy_all_the_raw_things(RawAdjLow, 'AdjLow')
+TidyAdjOpen  <- Tidy_all_the_raw_things(RawAdjOpen, 'AdjOpen')
+TidyVolume   <- Tidy_all_the_raw_things(RawVolume, 'StockVolume')
 
 
 ##### Quick data validation check to make sure we only have Mon - Fri
-TidyClosingDaysTable <- table(weekdays(TidyClosingStockData$ObsDate))
+table(weekdays(TidyAdjClose$ObsDate))
 
 
-##### NA's were so extensive, it seems inadvisable to fill, impute, or interpolate for them.
-# TODO: how to group by Ticker, and find length of NA's using RLE, but only inside margins...only after 1st !NA or before last !NA.  Possible?
-# DONT remove NA's until you compare NA's in 4 other CSV's.
-TidyClosingStockData <- TidyClosingStockData %>% filter(!is.na(Close))  
+#####  Join them all; check NA's
+TidyMasterDf <-
+left_join(TidyAdjClose, TidyAdjHigh, by=c("ObsDate", "Ticker")) %>%
+  left_join(TidyAdjLow, by=c("ObsDate", "Ticker")) %>%
+  left_join(TidyAdjOpen, by=c("ObsDate", "Ticker")) %>%
+  left_join(TidyVolume, by=c("ObsDate", "Ticker"))
+TidyMasterDf
 
-sl <- object.size(TidyClosingStockData)
-print(sl, units='auto')
+
+###### ObsDate, Ticker should have 0 NAs; subsequent 5 should have same # of NA's
+NA_Table_MasterDF <- table(sapply(TidyMasterDf, function(x) sum(length(which(is.na(x))))))
+
+if (NA_Table_MasterDF[1][[1]] == 2 && length(NA_Table_MasterDF) == 2){
+  TidyMasterDf <- TidyMasterDf %>% filter(!is.na(StockVolume))
+}
 
 
+##### Save some resources:  Convert tickers to factors, remove joined DFs
+TidyMasterDf$Ticker <- as.factor(TidyMasterDf$Ticker)
+rm(TidyAdjClose, TidyAdjHigh, TidyAdjLow, TidyAdjOpen, TidyVolume)
+
+
+
+TidyMasterDf
+
+
+
+
+
+################################################################
+#####  Decide what to do w/ this section.  Shiny?        
+################################################################
 ##### Get a distribution of records for all Tickers across Years.
 ClosingRecordsPerYearAndStock <-
 TidyClosingStockData %>%
@@ -120,14 +155,6 @@ p <- ggplot(ClosingRecordsPerYear, aes(ObsYear, StocksPerYear)) +
 ggplotly(p)
 
 
-
-
-
-
-# TODO:  Nest.  One record per ticker.  
-## Create Boolean columns (calculate in Shiny?) for above SMA(50, 100, 200).  
-## Create col for RSI(14)
-## Get company names, volume, call/put volume (important even if you ignore strike price)...Quandl, Quantmod, Google?
 
 
 
